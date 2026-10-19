@@ -1,6 +1,4 @@
-
 import numpy as np
-
 
 def sigmoid(Z):
     # Clip values to avoid overflow in exp.
