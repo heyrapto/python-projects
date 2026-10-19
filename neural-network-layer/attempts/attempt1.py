@@ -1,144 +1,254 @@
+
 import numpy as np
 
-nn_architecture = [
-    {"input_dim": 2, "output_dim": 4, "activation": "relu"},
-    {"input_dim": 4, "output_dim": 6, "activation": "relu"},
-    {"input_dim": 6, "output_dim": 6, "activation": "relu"},
-    {"input_dim": 4, "output_dim": 1, "activation": "sigmoid"},
-]
 
 def sigmoid(Z):
-    return 1/(1+np.exp(-Z))
+    # Clip values to avoid overflow in exp.
+    Z = np.clip(Z, -500, 500)
+    return 1.0 / (1.0 + np.exp(-Z))
+
 
 def relu(Z):
-    return np.maximum(0,Z)
+    return np.maximum(0, Z)
+
 
 def sigmoid_backward(dA, Z):
-    sig = sigmoid(Z)
-    return dA * sig * (1 - sig)
+    A = sigmoid(Z)
+    return dA * A * (1.0 - A)
+
 
 def relu_backward(dA, Z):
-    dZ = np.array(dA, copy = True)
-    dZ[Z <= 0] = 0;
-    return dZ;
+    dZ = np.array(dA, copy=True)
+    dZ[Z <= 0] = 0
+    return dZ
 
-def init_layers(nn_architecture, seed = 99):
-    np.random.seed(seed)
+
+def init_layers(nn_architecture, seed=99):
+    rng = np.random.default_rng(seed)
     param_values = {}
 
-    for idx, layer in enumerate(nn_architecture):
-        layer_idx = idx + 1
+    for idx, layer in enumerate(nn_architecture, start=1):
         layer_input = layer["input_dim"]
         layer_output = layer["output_dim"]
 
-        param_values["W" + str(layer_idx)] = np.random.radn(layer_output, layer_input) * 0.1
-        param_values["b" + str(layer_idx)] = np.random.radn(layer_output, 1) * 0.1
+        # He initialization for ReLU layers; Xavier for sigmoid.
+        if layer["activation"] == "relu":
+            scale = np.sqrt(2.0 / layer_input)
+        elif layer["activation"] == "sigmoid":
+            scale = np.sqrt(1.0 / layer_input)
+        else:
+            raise ValueError(
+                f"Unsupported activation: {layer['activation']}"
+            )
 
-    return param_values;
+        param_values[f"W{idx}"] = (
+            rng.standard_normal((layer_output, layer_input)) * scale
+        )
+        param_values[f"b{idx}"] = np.zeros((layer_output, 1))
 
-def single_layer_forward_propagation(A_prev, W_curr, b_curr, activation="relu"):
-    Z_curr = np.dot(A_prev, W_curr) + b_curr
+    return param_values
 
-    if(activation == "relu"):
-        activation_func = relu
-    if(activation == "sigmoid"):
-         activation_func = sigmoid
+
+def single_layer_forward_propagation(
+    A_prev, W_curr, b_curr, activation="relu"
+):
+    Z_curr = W_curr @ A_prev + b_curr
+
+    if activation == "relu":
+        A_curr = relu(Z_curr)
+    elif activation == "sigmoid":
+        A_curr = sigmoid(Z_curr)
     else:
-        raise Exception('Non-supported activation function')
+        raise ValueError(f"Unsupported activation: {activation}")
 
-    return activation_func(Z_curr), Z_curr;
+    return A_curr, Z_curr
+
 
 def full_forward_propagation(X, param_values, nn_architecture):
-    memory = {} # helps store the activations A & Z
+    memory = {}
     A_curr = X
 
-    for idx, layer in enumerate(nn_architecture):
-        layer_idx = idx + 1
+    for idx, layer in enumerate(nn_architecture, start=1):
         A_prev = A_curr
 
-        activation = layer["activation"]
-        W_curr = param_values["W" + str(layer_idx)]
-        b_curr = param_values["b" + str(layer_idx)]
-        A_curr, Z_curr = single_layer_forward_propagation(A_prev, W_curr, b_curr, activation)
+        W_curr = param_values[f"W{idx}"]
+        b_curr = param_values[f"b{idx}"]
 
-        memory["A" + str(idx)] = A_prev
-        memory["Z" + str(layer_idx)] = Z_curr
+        A_curr, Z_curr = single_layer_forward_propagation(
+            A_prev,
+            W_curr,
+            b_curr,
+            layer["activation"],
+        )
 
-        return A_curr, memory; # revisit, why are we returning A_curr?
+        memory[f"A{idx - 1}"] = A_prev
+        memory[f"Z{idx}"] = Z_curr
+
+    return A_curr, memory
+
 
 def convert_prob_into_class(Y_hat):
-    if Y_hat > 0.5:
-        return True
-    else:
-        return False
+    return (Y_hat > 0.5).astype(int)
+
 
 def get_cost_value(Y_hat, Y):
-    m = Y_hat.hat[1]
-    cost = -1 / m * (np.dot(Y, np.log(Y_hat).T) + np.dot(1 - Y, np.log(1 - Y_hat).T))
-    return np.squeeze(cost)
+    if Y_hat.shape != Y.shape:
+        raise ValueError(
+            f"Shape mismatch: predictions {Y_hat.shape}, labels {Y.shape}"
+        )
+
+    eps = 1e-12
+    Y_hat = np.clip(Y_hat, eps, 1.0 - eps)
+    m = Y.shape[1]
+
+    cost = -np.sum(
+        Y * np.log(Y_hat) + (1 - Y) * np.log(1 - Y_hat)
+    ) / m
+
+    return float(np.squeeze(cost))
+
 
 def get_accuracy_value(Y_hat, Y):
-    Y_hat_ = convert_prob_into_class(Y_hat)
-    return (Y_hat_ == Y).all(axis=0).mean()
+    predictions = convert_prob_into_class(Y_hat)
+    return float(np.mean(predictions == Y))
 
-def single_layer_backward_propagation(A_prev, Z_curr, dA_curr, W_curr b_curr, activation = "relu"):
+
+def single_layer_backward_propagation(
+    A_prev, Z_curr, dA_curr, W_curr, b_curr, activation="relu"
+):
+    del b_curr  # Bias is not needed to calculate these gradients.
+
     m = A_prev.shape[1]
 
     if activation == "relu":
-        backward_activation_func = relu_backward
-    if activation == "sigmoid":
-        backward_activation_func = sigmoid_backward
+        dZ_curr = relu_backward(dA_curr, Z_curr)
+    elif activation == "sigmoid":
+        dZ_curr = sigmoid_backward(dA_curr, Z_curr)
     else:
-        raise Exception("Non-supportec activation function")
-    
-    dZ_curr = backward_activation_func(dA_curr, Z_curr)
-    dW_curr = np.dot(dZ_curr, A_prev.T) / m
-    db_curr = np.sum(dZ_curr, axis=1, keepdims=True) / m # revisit
-    dA_prev = np.dot(W_curr.T, dZ_curr)
+        raise ValueError(f"Unsupported activation: {activation}")
 
-    return dA_prev, dW_curr, db_curr;
+    dW_curr = (dZ_curr @ A_prev.T) / m
+    db_curr = np.sum(dZ_curr, axis=1, keepdims=True) / m
+    dA_prev = W_curr.T @ dZ_curr
 
-def full_backward_propagation(nn_architecture, memory, param_values, Y_hat, Y):
+    return dA_prev, dW_curr, db_curr
+
+
+def full_backward_propagation(
+    nn_architecture, memory, param_values, Y_hat, Y
+):
+    if Y.ndim == 1:
+        Y = Y.reshape(1, -1)
+
+    if Y.shape != Y_hat.shape:
+        raise ValueError(
+            f"Shape mismatch: predictions {Y_hat.shape}, labels {Y.shape}"
+        )
+
     grad_values = {}
-    m = Y_hat.shape[1]
-    Y = Y.reshape(Y_hat.shape)
-    dA_prev = - (np.divide(Y, Y_hat) - np.divide(1 - Y, 1 - Y_hat))
+    Y_hat = np.clip(Y_hat, 1e-12, 1.0 - 1e-12)
 
-    for prev_layer_idx, layer in reversed(list(enumerate(nn_architecture))):
-        activation = layer["activation"]
-        layer_idx = idx + 1
+    # For sigmoid output + binary cross-entropy, dZ = Y_hat - Y.
+    dA_curr = -(Y / Y_hat) + (1.0 - Y) / (1.0 - Y_hat)
+    dA_curr *= Y_hat * (1.0 - Y_hat)
 
-        W_curr = param_values["W" + str(layer_idx)]
-        b_curr = param_values["b" + str(layer_idx)]
-        A_prev = memory["A" + str(prev_layer_idx)]
-        Z_curr = memory["Z" + str(layer_idx)]
-        dA_curr = dA_curr;
+    for layer_idx in reversed(range(1, len(nn_architecture) + 1)):
+        layer = nn_architecture[layer_idx - 1]
 
-        dA_prev, dW_curr, db_curr = single_layer_backward_propagation(A_prev, Z_curr, dA_curr, W_curr, b_curr, activation)
-        grad_values["dW" + str(layer_idx)] = dW_curr
-        grad_values["db" + str(layer_idx)] = db_curr
+        W_curr = param_values[f"W{layer_idx}"]
+        b_curr = param_values[f"b{layer_idx}"]
+        A_prev = memory[f"A{layer_idx - 1}"]
+        Z_curr = memory[f"Z{layer_idx}"]
 
-        return grad_values;
+        dA_prev, dW_curr, db_curr = single_layer_backward_propagation(
+            A_prev,
+            Z_curr,
+            dA_curr,
+            W_curr,
+            b_curr,
+            layer["activation"],
+        )
+
+        grad_values[f"dW{layer_idx}"] = dW_curr
+        grad_values[f"db{layer_idx}"] = db_curr
+
+        dA_curr = dA_prev
+
+    return grad_values
+
 
 def update(nn_architecture, param_values, grad_values, learning_rate):
-    for idx, layer in enumerate(nn_architecture):
-        param_values["W" + str(idx)] -= learning_rate * grad_values["dW" + str(idx)]
-        param_values["b" + str(idx)] -= learning_rate * grad_values["db" + str(idx)]
-    return param_values;
+    updated_params = {}
 
-def train(X, Y, nn_architecture, epochs, learning_rate):
-    param_values = init_layers(nn_architecture, 2)
+    for layer_idx in range(1, len(nn_architecture) + 1):
+        updated_params[f"W{layer_idx}"] = (
+            param_values[f"W{layer_idx}"]
+            - learning_rate * grad_values[f"dW{layer_idx}"]
+        )
+        updated_params[f"b{layer_idx}"] = (
+            param_values[f"b{layer_idx}"]
+            - learning_rate * grad_values[f"db{layer_idx}"]
+        )
+
+    return updated_params
+
+
+def train(
+    X,
+    Y,
+    nn_architecture,
+    epochs=1000,
+    learning_rate=0.01,
+    seed=99,
+):
+    if X.ndim != 2:
+        raise ValueError("X must have shape (input_features, examples).")
+
+    if Y.ndim == 1:
+        Y = Y.reshape(1, -1)
+
+    if Y.shape != (1, X.shape[1]):
+        raise ValueError("Y must have shape (1, number_of_examples).")
+
+    if epochs < 1:
+        raise ValueError("epochs must be at least 1.")
+
+    if learning_rate <= 0:
+        raise ValueError("learning_rate must be positive.")
+
+    expected_input_dim = X.shape[0]
+
+    for layer in nn_architecture:
+        if layer["input_dim"] != expected_input_dim:
+            raise ValueError(
+                f"Expected input_dim={expected_input_dim}, "
+                f"got {layer['input_dim']}."
+            )
+        expected_input_dim = layer["output_dim"]
+
+    if nn_architecture[-1]["activation"] != "sigmoid":
+        raise ValueError(
+            "Binary classification requires a sigmoid output layer."
+        )
+
+    param_values = init_layers(nn_architecture, seed)
     cost_history = []
     accuracy_history = []
 
-    for i in range(epochs):
-        Y_hat, cache = full_forward_propagation(X, param_values, nn_architecture)
-        cost = get_cost_value(Y_hat, Y)
-        cost_history.append(cost)
-        accuracy = get_accuracy_value(Y_hat, Y)
-        accuracy_history.append(accuracy)
+    for _ in range(epochs):
+        Y_hat, memory = full_forward_propagation(
+            X, param_values, nn_architecture
+        )
 
-        grad_values = full_backward_propagation(nn_architecture, cache, param_values, Y_hat, Y)
-        param_values = update(nn_architecture, param_values, grad_values, learning_rate)
+        cost_history.append(get_cost_value(Y_hat, Y))
+        accuracy_history.append(get_accuracy_value(Y_hat, Y))
 
-        return param_values, cost_history, accuracy_history
+        gradients = full_backward_propagation(
+            nn_architecture, memory, param_values, Y_hat, Y
+        )
+
+        param_values = update(
+            nn_architecture, param_values, gradients, learning_rate
+        )
+
+    return param_values, cost_history, accuracy_history
